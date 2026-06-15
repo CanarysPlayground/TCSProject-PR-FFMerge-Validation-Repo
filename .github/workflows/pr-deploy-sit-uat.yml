@@ -1,0 +1,59 @@
+# .github/workflows/pr-deploy-sit-uat.yml
+#
+# Stage 1 of 2 — runs when a PR is opened/updated against the target branch.
+# Deploys SIT, then UAT (UAT waits for SIT). Both jobs act as status checks
+# on the PR, so the approver can see green before approving.
+#
+# >>> Flow: release -> QA. The PR's BASE (target) branch is `QA`, so the
+#     branches filter below is set to `QA`. The PR head/source is `release`.
+
+name: PR Deploy - SIT and UAT
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - QA                 # <-- TARGET (base) branch of the PR (release -> QA).
+
+permissions:
+  contents: read
+
+# Cancel an in-flight deploy if the PR gets new commits.
+concurrency:
+  group: pr-deploy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-sit:
+    name: Deploy to SIT
+    runs-on: ubuntu-latest
+    environment:
+      name: SIT          # GitHub Environment — scope secrets/vars here
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Deploy to SIT
+        run: |
+          echo "Deploying ${{ github.event.pull_request.head.sha }} to SIT..."
+          # TODO: replace with your real SIT deploy commands
+          # e.g. ./deploy.sh sit   |   kubectl apply ...   |   az/aws/gcloud ...
+
+  deploy-uat:
+    name: Deploy to UAT
+    needs: deploy-sit      # UAT only runs if SIT succeeded
+    runs-on: ubuntu-latest
+    environment:
+      name: UAT
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Deploy to UAT
+        run: |
+          echo "Deploying ${{ github.event.pull_request.head.sha }} to UAT..."
+          # TODO: replace with your real UAT deploy commands

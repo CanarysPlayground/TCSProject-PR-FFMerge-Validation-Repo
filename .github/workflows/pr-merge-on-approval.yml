@@ -1,0 +1,92 @@
+# .github/workflows/pr-merge-on-approval.yml
+#
+# Stage 2 of 2 — runs when a reviewer submits an APPROVED review on the PR.
+# Confirms the PR is mergeable (SIT/UAT checks green), then fast-forward
+# merges the head into the base and pushes. The FF push auto-closes the PR.
+#
+# >>> Flow: release -> QA. Base branch is `QA`, matched in the `if` below.
+
+name: PR Merge on Approval (fast-forward)
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write          # needed to push the fast-forward
+  pull-requests: write     # needed to read/close the PR
+
+jobs:
+  ff-merge:
+    name: Fast-forward merge approved PR
+    runs-on: ubuntu-latest
+    # Only act on an APPROVAL for a PR targeting the QA branch.
+    if: >
+      github.event.review.state == 'approved' &&
+      github.event.pull_request.base.ref == 'QA'
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history required for a real fast-forward
+
+      - name: Wait for PR to be mergeable (checks green)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=${{ github.event.pull_request.number }}
+          echo "Verifying merge state for PR #$PR ..."
+          for i in $(seq 1 12); do
+            STATE=$(gh pr view "$PR" --json mergeStateStatus -q .mergeStateStatus)
+            echo "Attempt $i: mergeStateStatus=$STATE"
+            case "$STATE" in
+              CLEAN|HAS_HOOKS|UNSTABLE)
+                echo "PR is mergeable."; exit 0 ;;
+              BLOCKED)
+                echo "::error::PR is BLOCKED - required checks (SIT/UAT) not green yet, or other rules unmet."; exit 1 ;;
+              BEHIND)
+                echo "::error::PR head is BEHIND base - cannot fast-forward. Rebase the source branch and re-approve."; exit 1 ;;
+              DIRTY)
+                echo "::error::PR has merge conflicts."; exit 1 ;;
+              DRAFT)
+                echo "::error::PR is a draft."; exit 1 ;;
+              *)
+                echo "State still settling ($STATE), waiting..."; sleep 15 ;;
+            esac
+          done
+          echo "::error::Timed out waiting for a mergeable state."; exit 1
+
+      - name: Fast-forward merge and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BASE="${{ github.event.pull_request.base.ref }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+          git fetch origin "$BASE"
+          git checkout "$BASE"
+
+          if git merge --ff-only "$HEAD_SHA"; then
+            git push origin "$BASE"
+            echo "Fast-forwarded '$BASE' to $HEAD_SHA. GitHub will auto-close the PR as merged."
+          else
+            echo "::error::Cannot fast-forward '$BASE' - it has diverged from the PR head."
+            echo "Rebase the source branch onto '$BASE', push, then re-approve."
+            exit 1
+          fi
+
+# --- If branch protection blocks the direct push above ---------------------
+# Two options:
+#   1. Add github-actions[bot] (or a dedicated App/PAT) to the branch
+#      protection bypass list, OR
+#   2. Replace the "Fast-forward merge and push" step with GitHub's native
+#      rebase-and-merge (closest to FF that respects protection):
+#
+#        - name: Rebase-and-merge via GitHub
+#          env:
+#            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#          run: gh pr merge ${{ github.event.pull_request.number }} --rebase --delete-branch
+#
+#      Note: rebase-and-merge creates NEW commit SHAs (it is not a pure FF of
+#      the existing head commit), but it keeps a linear history.
